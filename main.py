@@ -155,6 +155,20 @@ def std_iter(ctor, _read=None, _write=None):
 			ctx.push(e)
 	return ctor, True, _read or read, _write or write
 
+def std_char(ctor, pre=lambda x:x, post=lambda x:x, _read=None, _write=None):
+	def read(ctx):
+		l, = ctx._pull("I")
+		o = bytearray(ctx._pull("B")[0] for _ in range(l))
+		print(o)
+		return post(o)
+	def write(obj, ctx):
+		obj = pre(obj)
+		ctx._push("I", len(obj))
+		for e in obj:
+			ctx._push("B", e)
+	return ctor, True, _read or read, _write or write
+
+
 def write_complex(obj, ctx):
 	ctx._push("2d", obj.real, obj.imag)
 def write_range(obj, ctx):
@@ -178,8 +192,8 @@ function = type(lambda:0)
 primary = [
 	nonetype, bool, int, float, complex, range,		# atom, no-mut
 	list,											# iter, mut
-	tuple, set, frozenset, bytearray,				# iter, no-mut-like
-	str, bytes,
+	tuple, set, frozenset,							# iter, no-mut-like
+	str, bytes, bytearray,							# iter, no-mut-like, const subtype
 	dict,
 ]
 
@@ -195,9 +209,12 @@ ctx.add_ctor(*std_iter(list, _read=read_list))
 ctx.add_ctor(*std_iter(tuple))
 ctx.add_ctor(*std_iter(set))
 ctx.add_ctor(*std_iter(frozenset))
+ctx.add_ctor(*std_char(str, pre=str.encode, post=lambda x:x.decode()))
+ctx.add_ctor(*std_char(bytes, post=bytes))
+ctx.add_ctor(*std_char(bytearray))
 
 b=[None, 42, 3.14]
-a=(0,b,b,3,4)
+a=(0,b,b,3,"♟️", b"\xe2\x99\x9f\xef\xb8\x8f", bytearray(b"\xe2\x99\x9f\xef\xb8\x8f"))
 b.append(a)
 ctx.push(a)
 ctx.clear()
