@@ -7,6 +7,7 @@ class TWD:
 		self.id = 0
 		self.obj_to_id = {}
 		self.id_to_obj = {}
+		self.watchers = {}
 		self.pre = pre
 
 	def clear(self):
@@ -14,12 +15,28 @@ class TWD:
 		self.obj_to_id.clear()
 		self.id_to_obj.clear()
 
-	def add(self, obj, *args):
+	def reserve(self):
+		self.id += 1
+		return self.id-1
+
+	def watch(self, id, func):
+		if id in self.watchers:
+			self.watchers[id].append(func)
+		else:
+			self.watchers[id] = [func]
+
+	def add(self, obj, *args, id=None):
 		if self.pre(obj) in self.obj_to_id:
 			return False
-		self.obj_to_id[self.pre(obj)] = (self.id, args)
-		self.id_to_obj[self.id] = (obj, args)
-		self.id += 1
+		if id is None:
+			id = self.id
+			self.id += 1
+		if id in self.watchers:
+			for callback in self.watchers[id]:
+				callback(obj, *args)
+			del self.watchers[id]
+		self.obj_to_id[self.pre(obj)] = (id, args)
+		self.id_to_obj[id] = (obj, args)
 		return True
 
 	def from_id(self, id, error=True):
@@ -31,6 +48,18 @@ class TWD:
 		if error and self.pre(obj) not in self.obj_to_id:
 			raise ValueError(f"{obj} isn't registerd in ctx")
 		return self.obj_to_id.get(self.pre(obj))
+
+
+class LazyRef:
+	def __init__(self, id):
+		self.id = id
+	def callback(self, obj, index):
+		def wrapper(e, *args):
+			print(f"CAUGHT_REF_{self.id}")
+			obj[index] = e
+		return wrapper
+	def __repr__(self):
+		return f"LAZY_REF_{self.id}"
 
 
 class Context:
@@ -71,7 +100,7 @@ class Context:
 			ref = self.refs.from_obj(obj, error=False)
 			if ref is not None:
 				self.write_guard(ref[0], is_ref=True)
-				return True
+				return
 			self.add_ref(obj)
 		self.write_guard(id, is_ref=False)
 		write(obj, self)
@@ -85,12 +114,16 @@ class Context:
 			self.add_ref(obj)
 		return obj
 
-	def pull_any(self):
+	def pull_any(self, lazy_ref=False):
 		print(f"PULL ANY")
 		value, is_ref = self.read_guard()
 		if is_ref:
 			print(f" `-> GUARD_REF_{value}")
-			obj, _ = self.refs.from_id(value)
+			ref = self.refs.from_id(value, error=not lazy_ref)
+			if ref is None:
+				obj = LazyRef(value)
+			else:
+				obj = ref[0]
 		else:
 			ctor, (mut, read, write) = self.ctors.from_id(value)
 			print(f" `-> GUARD_TYP_{ctor.__name__}")
@@ -112,7 +145,10 @@ def std_atom(ctor, fmt, _read=None, _write=None):
 def std_iter(ctor, _read=None, _write=None):
 	def read(ctx):
 		l, = ctx._pull("I")
-		return ctor(ctx.pull_any() for _ in range(l))
+		id = ctx.refs.reserve()
+		obj = ctor(ctx.pull_any() for _ in range(l))
+		ctx.refs.add(obj, id=id)
+		return obj
 	def write(obj, ctx):
 		ctx._push("I", len(obj))
 		for e in obj:
@@ -123,12 +159,17 @@ def write_complex(obj, ctx):
 	ctx._push("2d", obj.real, obj.imag)
 def write_range(obj, ctx):
 	ctx._push("3l", obj.start, obj.stop, obj.step)
+def write_none(obj, ctx):
+	pass
 def read_list(ctx):
 	l, = ctx._pull("I")
 	obj = [None]*l
 	ctx.add_ref(obj)
 	for i in range(l):
-		obj[i] = ctx.pull_any()
+		e = ctx.pull_any(lazy_ref=True)
+		obj[i] = e
+		if isinstance(e, LazyRef):
+			ctx.refs.watch(e.id, e.callback(obj, i))
 	return obj
 
 
@@ -144,7 +185,7 @@ primary = [
 
 
 ctx = Context()
-ctx.add_ctor(*std_atom(nonetype, "?"))
+ctx.add_ctor(*std_atom(nonetype, "", _write=write_none))
 ctx.add_ctor(*std_atom(bool, "?"))
 ctx.add_ctor(*std_atom(int, "l"))
 ctx.add_ctor(*std_atom(float, "d"))
@@ -155,8 +196,9 @@ ctx.add_ctor(*std_iter(tuple))
 ctx.add_ctor(*std_iter(set))
 ctx.add_ctor(*std_iter(frozenset))
 
-a=[0,1,2,3,4]
-a[1]=a
+b=[None, 42, 3.14]
+a=(0,b,b,3,4)
+b.append(a)
 ctx.push(a)
 ctx.clear()
 ctx.pull_any()
