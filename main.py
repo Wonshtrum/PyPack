@@ -62,6 +62,17 @@ class LazyRef:
 		return f"LAZY_REF_{self.id}"
 
 
+class uint:
+	pass
+def add_flags(value, *flags):
+	for f in flags:
+		value = value<<1|f
+	return value
+def get_flags(value, n):
+	flags = [value&(1<<i) for i in range(n)]
+	return value>>n, flags
+
+
 class Context:
 	def __init__(self, buff=b""):
 		self.ctors  = TWD()
@@ -105,9 +116,10 @@ class Context:
 		self.write_guard(id, is_ref=False)
 		write(obj, self)
 
-	def push_raw(self, obj):
-		ctor = type(obj)
+	def push_raw(self, ctor, obj, can_ref=True):
 		id, (mut, read, write) = self.ctors.from_obj(ctor)
+		if mut and can_ref:
+			self.add_ref(obj)
 		write(obj, self)
 
 	def pull(self, ctor):
@@ -149,34 +161,30 @@ def std_atom(ctor, fmt, _read=None, _write=None):
 
 def std_iter(ctor, _read=None, _write=None):
 	def read(ctx):
-		l, = ctx._pull("I")
+		l = ctx.pull(uint)
 		id = ctx.refs.reserve()
 		obj = ctor(ctx.pull_any() for _ in range(l))
 		ctx.refs.add(obj, id=id)
 		return obj
 	def write(obj, ctx):
-		ctx._push("I", len(obj))
+		ctx.push_raw(uint, len(obj))
 		for e in obj:
 			ctx.push(e)
 	return ctor, True, _read or read, _write or write
 
 def std_char(ctor, pre=lambda x:x, post=lambda x:x, _read=None, _write=None):
 	def read(ctx):
-		l, = ctx._pull("I")
+		l = ctx.pull(uint)
 		return post(bytearray(ctx._pull("B")[0] for _ in range(l)))
 	def write(obj, ctx):
 		obj = pre(obj)
-		ctx._push("I", len(obj))
+		ctx.push_raw(uint, len(obj))
 		for e in obj:
 			ctx._push("B", e)
 	return ctor, True, _read or read, _write or write
 
 
-def write_int(obj, ctx):
-	if obj < 0:
-		obj = -obj<<1|1
-	else:
-		obj <<= 1
+def write_uint(obj, ctx):
 	cond = True
 	while cond:
 		part = obj&((1<<7)-1)
@@ -184,7 +192,7 @@ def write_int(obj, ctx):
 		obj >>= 7
 		cond = obj>0
 		ctx._push("B", part<<1|cond)
-def read_int(ctx):
+def read_uint(ctx):
 	obj = 0
 	cond = True
 	i = 0
@@ -193,9 +201,14 @@ def read_int(ctx):
 		obj += (part>>1)<<i*7
 		i += 1
 		cond = part&1
-	if obj&1:
-		return -(obj>>1)
-	return obj>>1
+	return obj
+def write_int(obj, ctx):
+	write_uint(add_flags(abs(obj), obj<0), ctx)
+def read_int(ctx):
+	obj, sign = get_flags(read_uint(ctx), 1)
+	if sign:
+		return -obj
+	return obj
 def write_complex(obj, ctx):
 	ctx._push("2d", obj.real, obj.imag)
 def write_range(obj, ctx):
@@ -203,7 +216,7 @@ def write_range(obj, ctx):
 def write_none(obj, ctx):
 	pass
 def read_list(ctx):
-	l, = ctx._pull("I")
+	l = ctx.pull(uint)
 	obj = [None]*l
 	ctx.add_ref(obj)
 	for i in range(l):
@@ -228,7 +241,8 @@ primary = [
 ctx = Context()
 ctx.add_ctor(*std_atom(nonetype, "", _write=write_none))
 ctx.add_ctor(*std_atom(bool, "?"))
-ctx.add_ctor(int, True, read_int, write_int)
+ctx.add_ctor(uint, False, read_uint, write_uint)
+ctx.add_ctor(int,  False, read_int,  write_int)
 ctx.add_ctor(*std_atom(float, "d"))
 ctx.add_ctor(*std_atom(complex, "2d", _write=write_complex))
 ctx.add_ctor(*std_atom(range, "3l", _write=write_range))
@@ -240,7 +254,7 @@ ctx.add_ctor(*std_char(str, pre=str.encode, post=lambda x:x.decode()))
 ctx.add_ctor(*std_char(bytes, post=bytes))
 ctx.add_ctor(*std_char(bytearray))
 
-if False:
+if True:
 	b=[None, 42, 3.14]
 	a=(0,b,b,3,"♟️", b"\xe2\x99\x9f\xef\xb8\x8f", bytearray(b"\xe2\x99\x9f\xef\xb8\x8f"))
 	b.append(a)
