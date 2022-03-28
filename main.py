@@ -70,7 +70,7 @@ def add_flags(value, *flags):
 	return value
 def get_flags(value, n):
 	flags = [value&(1<<i) for i in range(n)]
-	return value>>n, flags
+	return (value>>n, *flags)
 
 
 class Context:
@@ -79,7 +79,6 @@ class Context:
 		self.refs   = TWD()
 		self.buff   = buff
 		self.offset = 0
-		self.guard_fmt = "I"
 
 	def clear(self):
 		self.refs.clear()
@@ -99,10 +98,9 @@ class Context:
 		return res
 
 	def write_guard(self, value, is_ref):
-		self._push(self.guard_fmt, value<<1|is_ref)
+		self.push_raw(uint, add_flags(value, is_ref))
 	def read_guard(self):
-		value, = self._pull(self.guard_fmt)
-		return value>>1, value&1
+		return get_flags(self.pull(uint), 1)
 
 	def push(self, obj, can_ref=True):
 		ctor = type(obj)
@@ -184,14 +182,6 @@ def std_char(ctor, pre=lambda x:x, post=lambda x:x, _read=None, _write=None):
 	return ctor, True, _read or read, _write or write
 
 
-def write_uint(obj, ctx):
-	cond = True
-	while cond:
-		part = obj&((1<<7)-1)
-		print(part)
-		obj >>= 7
-		cond = obj>0
-		ctx._push("B", part<<1|cond)
 def read_uint(ctx):
 	obj = 0
 	cond = True
@@ -202,19 +192,35 @@ def read_uint(ctx):
 		i += 1
 		cond = part&1
 	return obj
-def write_int(obj, ctx):
-	write_uint(add_flags(abs(obj), obj<0), ctx)
+def write_uint(obj, ctx):
+	cond = True
+	while cond:
+		part = obj&((1<<7)-1)
+		print(part)
+		obj >>= 7
+		cond = obj>0
+		ctx._push("B", part<<1|cond)
+
 def read_int(ctx):
 	obj, sign = get_flags(read_uint(ctx), 1)
 	if sign:
 		return -obj
 	return obj
+def write_int(obj, ctx):
+	write_uint(add_flags(abs(obj), obj<0), ctx)
+
+def read_range(ctx):
+	return range(ctx.pull(int), ctx.pull(int), ctx.pull(int))
+def write_range(obj, ctx):
+	for part in (obj.start, obj.stop, obj.step):
+		ctx.push_raw(int, part)
+
 def write_complex(obj, ctx):
 	ctx._push("2d", obj.real, obj.imag)
-def write_range(obj, ctx):
-	ctx._push("3l", obj.start, obj.stop, obj.step)
+
 def write_none(obj, ctx):
 	pass
+
 def read_list(ctx):
 	l = ctx.pull(uint)
 	obj = [None]*l
@@ -241,22 +247,26 @@ primary = [
 ctx = Context()
 ctx.add_ctor(*std_atom(nonetype, "", _write=write_none))
 ctx.add_ctor(*std_atom(bool, "?"))
-ctx.add_ctor(uint, False, read_uint, write_uint)
-ctx.add_ctor(int,  False, read_int,  write_int)
 ctx.add_ctor(*std_atom(float, "d"))
 ctx.add_ctor(*std_atom(complex, "2d", _write=write_complex))
-ctx.add_ctor(*std_atom(range, "3l", _write=write_range))
+
+ctx.add_ctor(uint,  False, read_uint,  write_uint)
+ctx.add_ctor(int,   False, read_int,   write_int)
+ctx.add_ctor(range, False, read_range, write_range)
+
 ctx.add_ctor(*std_iter(list, _read=read_list))
 ctx.add_ctor(*std_iter(tuple))
 ctx.add_ctor(*std_iter(set))
 ctx.add_ctor(*std_iter(frozenset))
+
 ctx.add_ctor(*std_char(str, pre=str.encode, post=lambda x:x.decode()))
 ctx.add_ctor(*std_char(bytes, post=bytes))
 ctx.add_ctor(*std_char(bytearray))
 
+
 if True:
 	b=[None, 42, 3.14]
-	a=(0,b,b,3,"♟️", b"\xe2\x99\x9f\xef\xb8\x8f", bytearray(b"\xe2\x99\x9f\xef\xb8\x8f"))
+	a=(0,b,b,range(-1,10**10))#,"♟️", b"\xe2\x99\x9f\xef\xb8\x8f", bytearray(b"\xe2\x99\x9f\xef\xb8\x8f"))
 	b.append(a)
 	ctx.push(a)
 	ctx.clear()
