@@ -105,13 +105,18 @@ class Context:
 		self.write_guard(id, is_ref=False)
 		write(obj, self)
 
+	def push_raw(self, obj):
+		ctor = type(obj)
+		id, (mut, read, write) = self.ctors.from_obj(ctor)
+		write(obj, self)
+
 	def pull(self, ctor):
 		print(f"PULL {ctor}")
 		id, (mut, read, write) = self.ctors.from_obj(ctor)
 		obj = read(self)
-		print(f" `-> {obj}")
 		if mut:
 			self.add_ref(obj)
+		print(f" `-> {obj}")
 		return obj
 
 	def pull_any(self, lazy_ref=False):
@@ -158,9 +163,7 @@ def std_iter(ctor, _read=None, _write=None):
 def std_char(ctor, pre=lambda x:x, post=lambda x:x, _read=None, _write=None):
 	def read(ctx):
 		l, = ctx._pull("I")
-		o = bytearray(ctx._pull("B")[0] for _ in range(l))
-		print(o)
-		return post(o)
+		return post(bytearray(ctx._pull("B")[0] for _ in range(l)))
 	def write(obj, ctx):
 		obj = pre(obj)
 		ctx._push("I", len(obj))
@@ -169,6 +172,30 @@ def std_char(ctor, pre=lambda x:x, post=lambda x:x, _read=None, _write=None):
 	return ctor, True, _read or read, _write or write
 
 
+def write_int(obj, ctx):
+	if obj < 0:
+		obj = -obj<<1|1
+	else:
+		obj <<= 1
+	cond = True
+	while cond:
+		part = obj&((1<<7)-1)
+		print(part)
+		obj >>= 7
+		cond = obj>0
+		ctx._push("B", part<<1|cond)
+def read_int(ctx):
+	obj = 0
+	cond = True
+	i = 0
+	while cond:
+		part, = ctx._pull("B")
+		obj += (part>>1)<<i*7
+		i += 1
+		cond = part&1
+	if obj&1:
+		return -(obj>>1)
+	return obj>>1
 def write_complex(obj, ctx):
 	ctx._push("2d", obj.real, obj.imag)
 def write_range(obj, ctx):
@@ -201,7 +228,7 @@ primary = [
 ctx = Context()
 ctx.add_ctor(*std_atom(nonetype, "", _write=write_none))
 ctx.add_ctor(*std_atom(bool, "?"))
-ctx.add_ctor(*std_atom(int, "l"))
+ctx.add_ctor(int, True, read_int, write_int)
 ctx.add_ctor(*std_atom(float, "d"))
 ctx.add_ctor(*std_atom(complex, "2d", _write=write_complex))
 ctx.add_ctor(*std_atom(range, "3l", _write=write_range))
@@ -213,9 +240,10 @@ ctx.add_ctor(*std_char(str, pre=str.encode, post=lambda x:x.decode()))
 ctx.add_ctor(*std_char(bytes, post=bytes))
 ctx.add_ctor(*std_char(bytearray))
 
-b=[None, 42, 3.14]
-a=(0,b,b,3,"♟️", b"\xe2\x99\x9f\xef\xb8\x8f", bytearray(b"\xe2\x99\x9f\xef\xb8\x8f"))
-b.append(a)
-ctx.push(a)
-ctx.clear()
-ctx.pull_any()
+if False:
+	b=[None, 42, 3.14]
+	a=(0,b,b,3,"♟️", b"\xe2\x99\x9f\xef\xb8\x8f", bytearray(b"\xe2\x99\x9f\xef\xb8\x8f"))
+	b.append(a)
+	ctx.push(a)
+	ctx.clear()
+	ctx.pull_any()
