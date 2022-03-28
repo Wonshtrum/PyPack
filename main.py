@@ -53,11 +53,13 @@ class TWD:
 class LazyRef:
 	def __init__(self, id):
 		self.id = id
+
 	def callback(self, obj, index):
 		def wrapper(e, *args):
 			print(f"CAUGHT_REF_{self.id}")
 			obj[index] = e
 		return wrapper
+
 	def __repr__(self):
 		return f"LAZY_REF_{self.id}"
 
@@ -66,7 +68,7 @@ class uint:
 	pass
 def add_flags(value, *flags):
 	for f in flags:
-		value = value<<1|f
+		value = value<<1|bool(f)
 	return value
 def get_flags(value, n):
 	flags = [value&(1<<i) for i in range(n)]
@@ -157,15 +159,37 @@ def std_atom(ctor, fmt, _read=None, _write=None):
 		ctx._push(fmt, obj)
 	return ctor, False, _read or read, _write or write
 
+def is_typed(obj, ctx):
+	if len(obj)<2:
+		return False
+	typ = type(next(iter(obj)))
+	if all(type(_)==typ for _ in obj) and\
+		all(ctx.refs.from_obj(_, error=False) is None for _ in obj):
+		id, (ctor, read, write) = ctx.ctors.from_obj(typ)
+		return id, write
+	return False
+
 def std_iter(ctor, _read=None, _write=None):
 	def read(ctx):
-		l = ctx.pull(uint)
+		l, typed = get_flags(ctx.pull(uint), 1)
 		id = ctx.refs.reserve()
-		obj = ctor(ctx.pull_any() for _ in range(l))
+		if typed:
+			id = ctx.pull(uint)
+			sub_ctor, (id, read, write) = ctx.ctors.from_id(id)
+			obj = ctor(read(ctx) for _ in range(l))
+		else:
+			obj = ctor(ctx.pull_any() for _ in range(l))
 		ctx.refs.add(obj, id=id)
 		return obj
 	def write(obj, ctx):
-		ctx.push_raw(uint, len(obj))
+		typed = is_typed(obj, ctx)
+		ctx.push_raw(uint, add_flags(len(obj), typed))
+		if typed:
+			id, write = typed
+			ctx.push_raw(uint, id)
+			for e in obj:
+				write(e, ctx)
+			return
 		for e in obj:
 			ctx.push(e)
 	return ctor, True, _read or read, _write or write
@@ -222,15 +246,35 @@ def write_none(obj, ctx):
 	pass
 
 def read_list(ctx):
-	l = ctx.pull(uint)
+	l, typed = get_flags(ctx.pull(uint), 1)
 	obj = [None]*l
 	ctx.add_ref(obj)
+	if typed:
+		id = ctx.pull(uint)
+		sub_ctor, (id, read, write) = ctx.ctors.from_id(id)
+		for i in range(l):
+			obj[i] = read(ctx)
+		return obj
 	for i in range(l):
 		e = ctx.pull_any(lazy_ref=True)
 		obj[i] = e
 		if isinstance(e, LazyRef):
 			ctx.refs.watch(e.id, e.callback(obj, i))
 	return obj
+
+def read_dict(ctx):
+	l = ctx.pull(uint)
+	obj = dict()
+	ctx.add_ref(obj)
+	for _ in range(l):
+		k = ctx.pull_any()
+		obj[k] = ctx.pull_any()
+	return obj
+def write_dict(obj, ctx):
+	ctx.push_raw(uint, len(obj))
+	for k, v in obj.items():
+		ctx.push(k)
+		ctx.push(v)
 
 
 nonetype = type(None)
@@ -263,11 +307,23 @@ ctx.add_ctor(*std_char(str, pre=str.encode, post=lambda x:x.decode()))
 ctx.add_ctor(*std_char(bytes, post=bytes))
 ctx.add_ctor(*std_char(bytearray))
 
+ctx.add_ctor(dict, True, read_dict, write_dict)
 
-if True:
+
+test = 2
+a=None
+if test == 0:
 	b=[None, 42, 3.14]
-	a=(0,b,b,range(-1,10**10))#,"♟️", b"\xe2\x99\x9f\xef\xb8\x8f", bytearray(b"\xe2\x99\x9f\xef\xb8\x8f"))
+	a=(0,b,b,range(-1,10**10),"♟️", b"\xe2\x99\x9f\xef\xb8\x8f", bytearray(b"\xe2\x99\x9f\xef\xb8\x8f"))
 	b.append(a)
-	ctx.push(a)
-	ctx.clear()
-	ctx.pull_any()
+elif test == 1:
+	a={0:1, "a":0.1}
+	b=(None, 42, 3.14)
+	a[b]=a
+elif test == 2:
+	a=list(range(100))
+	#a[3]="!"
+
+ctx.push(a)
+ctx.clear()
+ctx.pull_any()
