@@ -122,16 +122,16 @@ class Context:
 			self.add_ref(obj)
 		write(obj, self)
 
-	def pull(self, ctor):
+	def pull(self, ctor, can_ref=True):
 		print(f"PULL {ctor}")
 		id, (mut, read, write) = self.ctors.from_obj(ctor)
 		obj = read(self)
-		if mut:
+		if mut and can_ref:
 			self.add_ref(obj)
 		print(f" `-> {obj}")
 		return obj
 
-	def pull_any(self, lazy_ref=False):
+	def pull_any(self, can_ref=True, lazy_ref=False):
 		print(f"PULL ANY")
 		value, is_ref = self.read_guard()
 		if is_ref:
@@ -145,7 +145,7 @@ class Context:
 			ctor, (mut, read, write) = self.ctors.from_id(value)
 			print(f" `-> GUARD_TYP_{ctor.__name__}")
 			obj = read(self)
-			if mut:
+			if mut and can_ref:
 				self.add_ref(obj)
 		print(f" `-> {obj}")
 		return obj
@@ -263,18 +263,16 @@ def read_list(ctx):
 	return obj
 
 def read_dict(ctx):
-	l = ctx.pull(uint)
 	obj = dict()
 	ctx.add_ref(obj)
-	for _ in range(l):
-		k = ctx.pull_any()
-		obj[k] = ctx.pull_any()
+	keys = ctx.pull(tuple, can_ref=False)
+	values = ctx.pull(tuple, can_ref=False)
+	for k, v in zip(keys, values):
+		obj[k] = v
 	return obj
 def write_dict(obj, ctx):
-	ctx.push_raw(uint, len(obj))
-	for k, v in obj.items():
-		ctx.push(k)
-		ctx.push(v)
+	ctx.push_raw(tuple, obj.keys(), can_ref=False)
+	ctx.push_raw(tuple, obj.values(), can_ref=False)
 
 
 nonetype = type(None)
@@ -321,6 +319,9 @@ elif test == 1:
 	b=(None, 42, 3.14)
 	a[b]=a
 elif test == 2:
+	a={_:str(_) for _ in range(10)}
+	#a[10]=None
+elif test == 3:
 	a=list(range(100))
 	#a[3]="!"
 
