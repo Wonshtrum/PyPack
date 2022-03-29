@@ -1,4 +1,5 @@
 import struct
+from dis import get_instructions
 from inspect import currentframe as frame
 
 
@@ -85,8 +86,30 @@ class Context:
 		self.refs   = TWD()
 		self.buff   = buff
 		self.offset = 0
+		self.add_built_in_ctors()
+
+	def add_built_in_ctors(self):
+		self.add_ctor(*std_atom(type(None), "", _write=write_none))
+		self.add_ctor(*std_atom(bool, "?"))
+		self.add_ctor(*std_atom(float, "d"))
+		self.add_ctor(*std_atom(complex, "2d", _write=write_complex))
+
+		self.add_ctor(uint,  False, read_uint,  write_uint)
+		self.add_ctor(int,   False, read_int,   write_int)
+		self.add_ctor(range, False, read_range, write_range)
+
+		self.add_ctor(*std_iter(list, _read=read_list))
+		self.add_ctor(*std_iter(tuple))
+		self.add_ctor(*std_iter(set))
+		self.add_ctor(*std_iter(frozenset))
+		self.add_ctor(dict, True, read_dict, write_dict)
+
+		self.add_ctor(*std_char(str, pre=str.encode, post=lambda x:x.decode()))
+		self.add_ctor(*std_char(bytes, post=bytes))
+		self.add_ctor(*std_char(bytearray))
 
 	def clear(self):
+		self.offset = 0
 		self.refs.clear()
 
 	def add_ctor(self, ctor, mut, read, write):
@@ -108,10 +131,10 @@ class Context:
 	def read_guard(self):
 		return get_flags(self.pull(uint), 1)
 
-	def push(self, obj, can_ref=True):
+	def push(self, obj):
 		ctor = type(obj)
 		id, (mut, read, write) = self.ctors.from_obj(ctor)
-		if mut and can_ref:
+		if mut:
 			ref = self.refs.from_obj(obj, error=False)
 			if ref is not None:
 				self.write_guard(ref[0], is_ref=True)
@@ -120,22 +143,22 @@ class Context:
 		self.write_guard(id, is_ref=False)
 		write(obj, self)
 
-	def push_raw(self, ctor, obj, can_ref=True):
+	def push_raw(self, ctor, obj):
 		id, (mut, read, write) = self.ctors.from_obj(ctor)
-		if mut and can_ref:
+		if mut:
 			self.add_ref(obj)
 		write(obj, self)
 
-	def pull(self, ctor, can_ref=True):
+	def pull(self, ctor):
 		print(f"PULL {ctor}")
 		id, (mut, read, write) = self.ctors.from_obj(ctor)
 		obj = read(self)
-		if mut and can_ref:
+		if mut:
 			self.add_ref(obj)
 		print(f" `-> {obj}")
 		return obj
 
-	def pull_any(self, can_ref=True, lazy_ref=False):
+	def pull_any(self, lazy_ref=False):
 		print(f"PULL ANY")
 		value, is_ref = self.read_guard()
 		if is_ref:
@@ -149,7 +172,7 @@ class Context:
 			ctor, (mut, read, write) = self.ctors.from_id(value)
 			print(f" `-> GUARD_TYP_{ctor.__name__}")
 			obj = read(self)
-			if mut and can_ref:
+			if mut:
 				self.add_ref(obj)
 		print(f" `-> {obj}")
 		return obj
@@ -209,14 +232,12 @@ def std_char(ctor, pre=lambda x:x, post=lambda x:x, _read=None, _write=None):
 			ctx._push("B", e)
 	return ctor, True, _read or read, _write or write
 
-
 def guess_obj_attr(ctor):
-	import dis
 	attr = set()
 	for func in filter(callable, ctor.__dict__.values()):
 		on_self = False
 		trust_self_name = func.__code__.co_varnames[0] == "self"
-		for ins in dis.get_instructions(func):
+		for ins in get_instructions(func):
 			if on_self and ins.opcode == 95:
 				attr.add(ins.argval)
 			on_self = False
@@ -312,74 +333,3 @@ def read_dict(ctx):
 def write_dict(obj, ctx):
 	ctx.push_raw(tuple, obj.keys())
 	ctx.push_raw(tuple, obj.values())
-
-
-nonetype = type(None)
-function = type(lambda:0)
-primary = [
-	nonetype, bool, int, float, complex, range,		# atom, no-mut
-	list,											# iter, mut
-	tuple, set, frozenset,							# iter, no-mut-like
-	str, bytes, bytearray,							# iter, no-mut-like, const subtype
-	dict,
-]
-
-
-ctx = Context()
-ctx.add_ctor(*std_atom(nonetype, "", _write=write_none))
-ctx.add_ctor(*std_atom(bool, "?"))
-ctx.add_ctor(*std_atom(float, "d"))
-ctx.add_ctor(*std_atom(complex, "2d", _write=write_complex))
-
-ctx.add_ctor(uint,  False, read_uint,  write_uint)
-ctx.add_ctor(int,   False, read_int,   write_int)
-ctx.add_ctor(range, False, read_range, write_range)
-
-ctx.add_ctor(*std_iter(list, _read=read_list))
-ctx.add_ctor(*std_iter(tuple))
-ctx.add_ctor(*std_iter(set))
-ctx.add_ctor(*std_iter(frozenset))
-
-ctx.add_ctor(*std_char(str, pre=str.encode, post=lambda x:x.decode()))
-ctx.add_ctor(*std_char(bytes, post=bytes))
-ctx.add_ctor(*std_char(bytearray))
-
-ctx.add_ctor(dict, True, read_dict, write_dict)
-
-
-class TestGuess:
-	def __init__(self, a, b):
-		self.long_name_a = a
-		self.long_name_b = b
-		self.long_name_c = a*b
-		self.long_name_d = [(a, self) for _ in range(b)]
-		self.long_name_e = {a:b, b:a, "self":self}
-class TestNoGuess(TestGuess):
-	pass
-
-ctx.add_ctor(*std_obj(TestGuess))
-ctx.add_ctor(*std_obj(TestNoGuess, guess=False))
-
-
-test = 4
-a=None
-if test == 0:
-	b=[None, 42, 3.14]
-	a=(0,b,b,range(-1,10**10),"♟️", b"\xe2\x99\x9f\xef\xb8\x8f", bytearray(b"\xe2\x99\x9f\xef\xb8\x8f"))
-	b.append(a)
-elif test == 1:
-	a={0:1, "a":0.1}
-	b=(None, 42, 3.14)
-	a[b]=a
-elif test == 2:
-	a={_:str(_) for _ in range(10)}
-	#a[10]=None
-elif test == 3:
-	a=list(range(100))
-	#a[3]="!"
-elif test == 4:
-	a=[TestNoGuess(2,5), "***", TestNoGuess(2,5)]
-
-ctx.push(a)
-ctx.clear()
-x=ctx.pull_any()
