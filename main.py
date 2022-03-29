@@ -3,7 +3,11 @@ from inspect import currentframe as frame
 
 
 class TWD:
-	def __init__(self, pre=id):
+	def default_pre(x):
+		if isinstance(x, (str, bytes, bytearray)):
+			return x
+		return id(x)
+	def __init__(self, pre=default_pre):
 		self.id = 0
 		self.obj_to_id = {}
 		self.id_to_obj = {}
@@ -206,6 +210,41 @@ def std_char(ctor, pre=lambda x:x, post=lambda x:x, _read=None, _write=None):
 	return ctor, True, _read or read, _write or write
 
 
+def guess_obj_attr(ctor):
+	import dis
+	attr = set()
+	for func in filter(callable, ctor.__dict__.values()):
+		on_self = False
+		trust_self_name = func.__code__.co_varnames[0] == "self"
+		for ins in dis.get_instructions(func):
+			if on_self and ins.opcode == 95:
+				attr.add(ins.argval)
+			on_self = False
+			if (ins.opcode == 124 and ins.arg == 0 or
+				ins.opcode == 136 and ins.argval == "self" and trust_self_name):
+				on_self = True
+	return attr
+
+def std_obj(ctor, _read=None, _write=None, guess=True):
+	if guess:
+		attr = guess_obj_attr(ctor)
+		def read(ctx):
+			obj = ctor.__new__(ctor)
+			ctx.add_ref(obj)
+			obj.__dict__ = {k:v for k,v in zip(attr, ctx.pull(tuple))}
+			return obj
+		def write(obj, ctx):
+			ctx.push_raw(tuple, tuple(obj.__getattribute__(k) for k in attr))
+	else:
+		def read(ctx):
+			obj = ctor.__new__(ctor)
+			ctx.add_ref(obj)
+			obj.__dict__ = ctx.pull(dict)
+			return obj
+		def write(obj, ctx):
+			ctx.push_raw(dict, obj.__dict__)
+	return ctor, True, _read or read, _write or write
+
 def read_uint(ctx):
 	obj = 0
 	cond = True
@@ -265,14 +304,14 @@ def read_list(ctx):
 def read_dict(ctx):
 	obj = dict()
 	ctx.add_ref(obj)
-	keys = ctx.pull(tuple, can_ref=False)
-	values = ctx.pull(tuple, can_ref=False)
+	keys = ctx.pull(tuple)
+	values = ctx.pull(tuple)
 	for k, v in zip(keys, values):
 		obj[k] = v
 	return obj
 def write_dict(obj, ctx):
-	ctx.push_raw(tuple, obj.keys(), can_ref=False)
-	ctx.push_raw(tuple, obj.values(), can_ref=False)
+	ctx.push_raw(tuple, obj.keys())
+	ctx.push_raw(tuple, obj.values())
 
 
 nonetype = type(None)
@@ -308,7 +347,21 @@ ctx.add_ctor(*std_char(bytearray))
 ctx.add_ctor(dict, True, read_dict, write_dict)
 
 
-test = 2
+class TestGuess:
+	def __init__(self, a, b):
+		self.long_name_a = a
+		self.long_name_b = b
+		self.long_name_c = a*b
+		self.long_name_d = [(a, self) for _ in range(b)]
+		self.long_name_e = {a:b, b:a, "self":self}
+class TestNoGuess(TestGuess):
+	pass
+
+ctx.add_ctor(*std_obj(TestGuess))
+ctx.add_ctor(*std_obj(TestNoGuess, guess=False))
+
+
+test = 4
 a=None
 if test == 0:
 	b=[None, 42, 3.14]
@@ -324,7 +377,9 @@ elif test == 2:
 elif test == 3:
 	a=list(range(100))
 	#a[3]="!"
+elif test == 4:
+	a=[TestNoGuess(2,5), "***", TestNoGuess(2,5)]
 
 ctx.push(a)
 ctx.clear()
-ctx.pull_any()
+x=ctx.pull_any()
